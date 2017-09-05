@@ -12,17 +12,21 @@
     "hw_disk_size": "40000",
     "headless": "false",
     "ssh_timeout": "60m",
-    "compression_level": "6"
+    "compression_level": "6",
+    "typo3_version": "8.7.4"
   },
   "builders": [{
     "type": "qemu",
+    "machine_type": "q35",
+    "format": "qcow2",
+    "accelerator": "kvm",
     "qemuargs": [
       ["-m", "{{user `hw_memory`}}"],
       ["-smp", "{{user `hw_cpus`}}"]
     ],
     "disk_size": "{{user `hw_disk_size`}}",
-    "output_directory": "packer-ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{build_type}}",
-    "vm_name": "ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{build_type}}",
+    "output_directory": "./output/ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{build_type}}",
+    "vm_name": "ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{build_type}}.qcow2",
 
     "iso_url": "{{user `iso_mirror`}}/{{user `iso_version`}}/ubuntu-{{user `iso_version`}}.{{user `iso_revision`}}-{{user `iso_type`}}-{{user `iso_arch`}}.iso",
     "iso_checksum": "{{user `iso_checksum`}}",
@@ -34,17 +38,13 @@
     "boot_command": [
       "<enter><wait>",
       "<f6><esc>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs><bs><bs><bs><bs><bs><bs><bs>",
-      "<bs><bs><bs>",
+      "<home>",
+      "<del><del><del><del><del><del><del><del>",
+      "<del><del><del><del><del><del><del><del>",
+      "<del><del><del><del><del><del><del><del>",
+      "<del><del><del><del><del><del><del><del>",
+      "<del><del><del><del><del><del>",
       "/install/vmlinuz ",
-      "initrd=/install/initrd.gz ",
       "net.ifnames=0 ",
       "auto-install/enable=true ",
       "debconf/priority=critical ",
@@ -57,16 +57,27 @@
     "shutdown_command": "sudo systemctl poweroff"
   }],
   "provisioners": [{
+    "type": "file",
+    "source": "dist/typo3_src-{{user `typo3_version`}}.tar.gz",
+    "destination": "/tmp/typo3_src-{{user `typo3_version`}}.tar.gz"
+  },
+  {
+    "type": "file",
+    "source": "files/apache2-typo3-site.conf",
+    "destination": "/tmp/apache2-typo3-site.conf"
+  },
+  {
     "type": "shell",
     "scripts": [
       "scripts/ubuntu/apt.sh",
+      "scripts/ubuntu/typo3.sh",
       "scripts/ubuntu/cleanup.sh"
     ]
   }],
   "post-processors": [{
     "type": "vagrant",
     "compression_level": "{{user `compression_level`}}",
-    "output": "ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{.Provider}}.box",
+    "output": "output/ubuntu-{{user `iso_version`}}-{{user `iso_arch`}}-{{.Provider}}.box",
     "vagrantfile_template": "Vagrantfile.template"
   }]
 }
