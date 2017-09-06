@@ -1,34 +1,37 @@
-UBUNTU_VERSION=16.04
+DISTRIB_NAME=ubuntu
+DISTRIB_VERSION=16.04
 
-PACKER_TEMPLATE=ubuntu-${UBUNTU_VERSION}.json
+PACKER_TEMPLATE=${DISTRIB_NAME}-${DISTRIB_VERSION}.json
 
 VAGRANT_PROVIDER=libvirt
-VAGRANT_BOX=output/ubuntu-${UBUNTU_VERSION}-amd64-${VAGRANT_PROVIDER}.box
-VAGRANT_BOX_NAME=${USER}/ubuntu
-
+VAGRANT_BOX_VARIANT=typo3-8-lts
+VAGRANT_BOX_NAME=${USER}/${VAGRANT_BOX_VARIANT}
 #VAGRANT_LOG=debug
-
-LIBVIRT_VOL=`virsh vol-list default | grep ${USER}-VAGRANTSLASH-ubuntu | awk '{print $$1}')`
+VAGRANT_BOX=output/${DISTRIB_NAME}-${DISTRIB_VERSION}-amd64-${VAGRANT_PROVIDER}.box
 
 DIST_DIR=dist
-TYPO3_DIST=${DIST_DIR}/typo3_src-8.7.4.tar.gz
+TYPO3_VERSION=8.7.5
+TYPO3_URL=get.typo3.org/${TYPO3_VERSION}
+TYPO3_DIST=${DIST_DIR}/typo3_src-${TYPO3_VERSION}.tar.gz
+
+LIBVIRT_VOL=`virsh vol-list default | grep ${USER}-VAGRANTSLASH-${VAGRANT_BOX_VARIANT} | awk '{print $$1}')`
 
 default: build
 
 build: ${TYPO3_DIST} ${VAGRANT_BOX}
 
 ${TYPO3_DIST}:
-	wget --content-disposition get.typo3.org/current -P ${DIST_DIR}
+	wget --content-disposition ${TYPO3_URL} -P ${DIST_DIR}
 
 ${VAGRANT_BOX}: ${PACKER_TEMPLATE}
-	packer build ${PACKER_TEMPLATE}
+	packer build -var 'typo3_version=${TYPO3_VERSION}' -var 'iso_version=${DISTRIB_VERSION}' ${PACKER_TEMPLATE}
 
 install: build
 	vagrant box add ${VAGRANT_BOX} --name ${VAGRANT_BOX_NAME} --force
 
 uninstall: testclean
 	# Remove vagrant box
-	if [ `vagrant box list | grep mbouchar/ubuntu | wc -l` -ne 0 ]; then \
+	if [ `vagrant box list | grep ${VAGRANT_BOX_NAME} | wc -l` -ne 0 ]; then \
 	    vagrant box remove ${VAGRANT_BOX_NAME}; \
 	fi
 	# Remove libvirt volume from storage pool

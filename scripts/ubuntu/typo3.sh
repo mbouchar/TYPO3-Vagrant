@@ -3,15 +3,21 @@
 set -e
 set -x
 
+if [ "${TYPO3_VERSION}" == "" ]; then
+    echo "You must specify the TYPO3 version to use as the TYPO3_VERSION environment variable to the script"
+    exit 1
+fi
+
 #
 # Configure PHP
 #
 
-sudo apt-get install -y php-fpm php-opcache php-gd php-mysql php-soap php-xml php-zip;
+sudo apt-get install -y php-fpm php-opcache php-gd php-mysql php-soap php-xml php-zip php-xdebug;
 sudo sed -i "s/user = www-data/user = vagrant/" /etc/php/7.0/fpm/pool.d/www.conf
 sudo sed -i "s/group = www-data/group = vagrant/" /etc/php/7.0/fpm/pool.d/www.conf
 sudo su - -c "echo 'php_admin_value[max_execution_time]=240' >> /etc/php/7.0/fpm/pool.d/www.conf"
 sudo su - -c "echo 'php_admin_value[max_input_vars]=1500' >> /etc/php/7.0/fpm/pool.d/www.conf"
+sudo su - -c "echo 'php_admin_value[xdebug.max_nesting_level]=400' >> /etc/php/7.0/fpm/pool.d/www.conf"
 sudo service php7.0-fpm restart
 
 # @todo: en TCP?
@@ -22,7 +28,7 @@ sudo service php7.0-fpm restart
 #
 
 sudo apt-get install -y apache2
-sudo a2enmod alias headers proxy_fcgi ssl status
+sudo a2enmod alias headers proxy_fcgi rewrite ssl status
 sudo a2dissite 000-default
 sudo mv /tmp/apache2-typo3-site.conf /etc/apache2/sites-available/typo3.conf
 sudo a2ensite typo3
@@ -42,17 +48,29 @@ sudo mysql -e "GRANT ALL PRIVILEGES ON typo3.* TO typo3"
 #
 
 mkdir -p ${HOME}/dists/
-tar -zxf /tmp/typo3_src-8.7.4.tar.gz -C ${HOME}/dists/
-rm /tmp/typo3_src-8.7.4.tar.gz
+tar -zxf /tmp/typo3_src-${TYPO3_VERSION}.tar.gz -C ${HOME}/dists/
+rm /tmp/typo3_src-${TYPO3_VERSION}.tar.gz
+
+cd ${HOME}/dists/typo3_src-${TYPO3_VERSION}
+patch -p1 -i /tmp/TYPO3-8-lts-add-install-commands.patch
+rm /tmp/TYPO3-8-lts-add-install-commands.patch
 
 mkdir -p ${HOME}/site/
 cd ${HOME}/site
-ln -s ../dists/typo3_src-8.7.4 typo3_src
+ln -s ../dists/typo3_src-${TYPO3_VERSION} typo3_src
 ln -s typo3_src/typo3 .
 ln -s typo3_src/index.php .
 touch FIRST_INSTALL
 
-#$GLOBALS[TYPO3_CONF_VARS][SYS][systemLocale] is not set. This is fine as long as no UTF-8 file system is used.
+cd ${HOME}/site/
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:environmentandfolders
+# @todo: default values for host and port
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:databaseconnect:mysql --user=typo3 --password=typo3 --database=typo3 --host=localhost --port=3306
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:databasedata --username=admin --password=password
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:setconfig --path=SYS/UTF8filesystem --value=true --type=bool
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:setconfig --path=SYS/systemLocale --value='en_US.UTF-8'
+/usr/bin/env php typo3/sysext/core/bin/typo3 install:defaultconfiguration
+
 #@todo: permissions sur les fichiers
 #@todo: debug configuration presets
 

@@ -13,7 +13,7 @@
     "headless": "false",
     "ssh_timeout": "60m",
     "compression_level": "6",
-    "typo3_version": "8.7.4"
+    "typo3_version": "8.7.5"
   },
   "builders": [{
     "type": "qemu",
@@ -63,11 +63,19 @@
   },
   {
     "type": "file",
+    "source": "files/TYPO3-8-lts-add-install-commands.patch",
+    "destination": "/tmp/TYPO3-8-lts-add-install-commands.patch"
+  },
+  {
+    "type": "file",
     "source": "files/apache2-typo3-site.conf",
     "destination": "/tmp/apache2-typo3-site.conf"
   },
   {
     "type": "shell",
+    "environment_vars": [
+        "TYPO3_VERSION={{user `typo3_version`}}"
+    ],
     "scripts": [
       "scripts/ubuntu/apt.sh",
       "scripts/ubuntu/typo3.sh",

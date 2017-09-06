@@ -1,0 +1,1149 @@
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Console/CommandApplication.php typo3_src-8.7.4/typo3/sysext/core/Classes/Console/CommandApplication.php
+--- typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Console/CommandApplication.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/core/Classes/Console/CommandApplication.php	2017-08-29 15:13:00.160894700 -0400
+@@ -55,14 +55,27 @@
+         $this->defineLegacyConstants();
+         $this->bootstrap = Bootstrap::getInstance()
+             ->initializeClassLoader($classLoader)
+-            ->setRequestType(TYPO3_REQUESTTYPE_CLI)
+-            ->baseSetup($this->entryPointLevel);
++            ->pathSetup($this->entryPointLevel, TYPO3_REQUESTTYPE_CLI);
++
++        if ($this->bootstrap->checkIfEssentialConfigurationExists()) {
++            $this->bootstrap->setRequestType(TYPO3_REQUESTTYPE_CLI);
++        } else {
++            $this->bootstrap->setRequestType(TYPO3_REQUESTTYPE_CLI | TYPO3_REQUESTTYPE_INSTALL);
++        }
++
++        $this->bootstrap->baseSetup($this->entryPointLevel);
+ 
+         foreach ($this->availableRequestHandlers as $requestHandler) {
+             $this->bootstrap->registerRequestHandlerImplementation($requestHandler);
+         }
+ 
++        if ($this->bootstrap->checkIfEssentialConfigurationExists()) {
+         $this->bootstrap->configure();
++        } else {
++            $this->bootstrap
++                ->startOutputBuffering()
++                ->loadConfigurationAndInitialize(false, \TYPO3\CMS\Core\Package\FailsafePackageManager::class);
++        }
+     }
+ 
+     /**
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Console/CommandRequestHandler.php typo3_src-8.7.4/typo3/sysext/core/Classes/Console/CommandRequestHandler.php
+--- typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Console/CommandRequestHandler.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/core/Classes/Console/CommandRequestHandler.php	2017-08-29 15:13:00.167894000 -0400
+@@ -60,11 +60,15 @@
+     {
+         $output = new ConsoleOutput();
+ 
++        if ($this->bootstrap->checkIfEssentialConfigurationExists()) {
+         $this->bootstrap
+             ->loadBaseTca()
+             ->loadExtTables()
+             // create the BE_USER object (not logged in yet)
+-            ->initializeBackendUser(CommandLineUserAuthentication::class)
++                ->initializeBackendUser(CommandLineUserAuthentication::class);
++        }
++        
++        $this->bootstrap
+             ->initializeLanguageObject()
+             // Make sure output is not buffered, so command-line output and interaction can take place
+             ->endOutputBufferingAndCleanPreviousOutput();
+@@ -135,7 +139,16 @@
+         /** @var PackageManager $packageManager */
+         $packageManager = Bootstrap::getInstance()->getEarlyInstance(PackageManager::class);
+ 
+-        foreach ($packageManager->getActivePackages() as $package) {
++        // Check if TYPO3 initial configuration is done and load all available commands.
++        // Otherwise, just load the install tool commands
++        if ($this->bootstrap->checkIfEssentialConfigurationExists()) {
++            $activePackages = $packageManager->getActivePackages();
++        } else {
++            $installPackageName = $packageManager->getPackageKeyFromComposerName("install");
++            $activePackages = [$packageManager->getPackage($installPackageName)];
++        }
++
++        foreach ($activePackages as $package) {
+             $commandsOfExtension = $package->getPackagePath() . 'Configuration/Commands.php';
+             if (@is_file($commandsOfExtension)) {
+                 $commands = require_once $commandsOfExtension;
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Core/Bootstrap.php typo3_src-8.7.4/typo3/sysext/core/Classes/Core/Bootstrap.php
+--- typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Core/Bootstrap.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/core/Classes/Core/Bootstrap.php	2017-08-29 15:13:00.176893100 -0400
+@@ -14,9 +14,11 @@
+  * The TYPO3 project - inspiring people to share!
+  */
+ 
++use RuntimeException;
+ use TYPO3\CMS\Core\Utility\ExtensionManagementUtility;
+ use TYPO3\CMS\Core\Utility\GeneralUtility;
+ use TYPO3\CMS\Core\Utility\MathUtility;
++use TYPO3\CMS\Core\Database\ConnectionPool;
+ 
+ /**
+  * This class encapsulates bootstrap related methods.
+@@ -184,6 +186,21 @@
+     }
+ 
+     /**
++     * Run the system environment builder to determine pathes. The TYPO3_REQUESTTYPE may not be defined at that point.
++     * In that case, the system will assume that the cli is used.
++     *
++     * @param int $entryPointLevel Number of subdirectories where the entry script is located under the document root
++     * @return Bootstrap
++     * @internal This is not a public API method, do not use in own extensions
++     */
++    public function pathSetup($entryPointLevel = 0, $requestType = null)
++    {
++        // Load PATH informations
++        SystemEnvironmentBuilder::run($entryPointLevel, $requestType);
++        return $this;
++    }
++
++    /**
+      * Run the base setup that checks server environment, determines paths,
+      * populates base files and sets common configuration.
+      *
+@@ -224,17 +241,34 @@
+     }
+ 
+     /**
+-     * checks if LocalConfiguration.php or PackageStates.php is missing,
+-     * used to see if a redirect to the install tool is needed
++     * Verify that TYPO3 is correctly configured:
++     * - Checks if LocalConfiguration.php or PackageStates.php is missing
++     * - Check if the initial installation is in progress
++     * - Checks that the initial database data import is done
+      *
+      * @return bool TRUE when the essential configuration is available, otherwise FALSE
+      * @internal This is not a public API method, do not use in own extensions
+      */
+     public function checkIfEssentialConfigurationExists()
+     {
++        // Check if essential configuration files exists
+         $configurationManager = new \TYPO3\CMS\Core\Configuration\ConfigurationManager;
+         $this->setEarlyInstance(\TYPO3\CMS\Core\Configuration\ConfigurationManager::class, $configurationManager);
+-        return file_exists($configurationManager->getLocalConfigurationFileLocation()) && file_exists(PATH_typo3conf . 'PackageStates.php');
++        if (!file_exists($configurationManager->getLocalConfigurationFileLocation()) || !file_exists(PATH_typo3conf . 'PackageStates.php')) {
++            return false;
++        }
++
++        // Check if the initial installation is in progress
++        if ($configurationManager->getConfigurationValueByPath('SYS/isInitialInstallationInProgress')) {
++            return false;
++        }
++        
++        // Check if initial data import is done
++        if (!$configurationManager->getConfigurationValueByPath('SYS/isInitialDatabaseImportDone')) {
++            return false;
++        }
++
++        return true;
+     }
+ 
+     /**
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Core/SystemEnvironmentBuilder.php typo3_src-8.7.4/typo3/sysext/core/Classes/Core/SystemEnvironmentBuilder.php
+--- typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Core/SystemEnvironmentBuilder.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/core/Classes/Core/SystemEnvironmentBuilder.php	2017-08-29 15:13:00.185892200 -0400
+@@ -67,10 +67,10 @@
+      * @internal This method should not be used by 3rd party code. It will change without further notice.
+      * @param int $entryPointLevel Number of subdirectories where the entry script is located under the document root
+      */
+-    public static function run($entryPointLevel = 0)
++    public static function run($entryPointLevel = 0, $requestType = null)
+     {
+         self::defineBaseConstants();
+-        self::definePaths($entryPointLevel);
++        self::definePaths($entryPointLevel, $requestType);
+         self::checkMainPathsExist();
+         self::initializeGlobalVariables();
+         self::initializeGlobalTimeTrackingVariables();
+@@ -146,14 +146,18 @@
+      *
+      * @param int $entryPointLevel Number of subdirectories where the entry script is located under the document root
+      */
+-    protected static function definePaths($entryPointLevel = 0)
++    protected static function definePaths($entryPointLevel = 0, $requestType = null)
+     {
++        if ($requestType === null) {
++            $requestType = TYPO3_REQUESTTYPE;
++        }
++
+         // Absolute path of the entry script that was called
+-        $scriptPath = GeneralUtility::fixWindowsFilePath(self::getPathThisScript());
++        $scriptPath = GeneralUtility::fixWindowsFilePath(self::getPathThisScript($requestType));
+         $rootPath = self::getRootPathFromScriptPath($scriptPath, $entryPointLevel);
+         // Check if the root path has been set in the environment (e.g. by the composer installer)
+         if (getenv('TYPO3_PATH_ROOT')) {
+-            if ((TYPO3_REQUESTTYPE & TYPO3_REQUESTTYPE_CLI)
++            if (($requestType & TYPO3_REQUESTTYPE_CLI)
+                 && Bootstrap::usesComposerClassLoading()
+                 && StringUtility::endsWith($scriptPath, 'typo3')
+             ) {
+@@ -282,9 +286,9 @@
+      *
+      * @return string Absolute path to entry script
+      */
+-    protected static function getPathThisScript()
++    protected static function getPathThisScript($requestType)
+     {
+-        if (TYPO3_REQUESTTYPE & TYPO3_REQUESTTYPE_CLI) {
++        if ($requestType & TYPO3_REQUESTTYPE_CLI) {
+             return self::getPathThisScriptCli();
+         }
+         return self::getPathThisScriptNonCli();
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/extensionmanager/Classes/Command/ExtensionCommandController.php typo3_src-8.7.4/typo3/sysext/extensionmanager/Classes/Command/ExtensionCommandController.php
+--- typo3_src-8.7.4_orig/typo3/sysext/extensionmanager/Classes/Command/ExtensionCommandController.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/extensionmanager/Classes/Command/ExtensionCommandController.php	2017-08-29 15:13:00.193891400 -0400
+@@ -76,6 +76,25 @@
+     }
+ 
+     /**
++     * Check if an extension is already installed and loaded.
++     *
++     * @param string $extensionKey
++     * @return void
++     * @cli
++     */
++    public function isInstalledCommand($extensionKey)
++    {
++        /** @var $service \TYPO3\CMS\Extensionmanager\Utility\InstallUtility */
++       $service = $this->objectManager->get(\TYPO3\CMS\Extensionmanager\Utility\InstallUtility::class);
++        if ($service->isLoaded($extensionKey)) {
++            $this->output->outputLine('The extension ' . $extensionKey . ' is loaded');
++        } else {
++            $this->output->outputLine('<error>The extension ' . $extensionKey . ' is not loaded.</error>');
++            $this->quit(1);
++        }
++    }
++
++    /**
+      * Updates class loading information.
+      *
+      * This command is only needed during development. The extension manager takes care
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/AbstractInstallCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/AbstractInstallCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/AbstractInstallCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/AbstractInstallCommand.php	2017-08-29 15:13:00.200890700 -0400
+@@ -0,0 +1,72 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Command\Command;
++use TYPO3\CMS\Core\Cache\Backend\NullBackend;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Service\EnableFileService;
++
++/**
++ * Base class for all install tool commands
++ */
++class AbstractInstallCommand extends Command
++{    
++    // Error message to tell the user that the install tool is disabled
++    protected $install_disabled_error = 'Access to the install tool is disabled. Please check the FIRST_INSTALL file at the root of the site or the ENABLE_INSTALL_TOOL in the typo3conf folder.';
++
++    /**
++     * Check if access to the install tool is allowed
++     *
++     * @return bool: true if access is allowed, false otherwise
++     */
++    protected function installToolEnabled() {
++        $installToolEnableService = GeneralUtility::makeInstance(\TYPO3\CMS\Install\Service\EnableFileService::class);
++        if ($installToolEnableService->isFirstInstallAllowed() || $installToolEnableService->checkInstallToolEnableFile()) {
++            return true;
++        } else {
++            return false;
++        }
++    }
++    
++    /**
++     * @todo: Copied from TYPO3\CMS\Install\Controller\AbstractController
++     *
++     * Required extbase ext_localconf
++     * Set caching to NullBackend, install tool must not cache anything
++     *
++     * @return void
++     */
++    protected function loadBaseExtensions()
++    {
++        // @todo: Find out if this could be left out
++        require(\TYPO3\CMS\Core\Utility\ExtensionManagementUtility::extPath('extbase') . 'ext_localconf.php');
++
++        $cacheConfigurations = $GLOBALS['TYPO3_CONF_VARS']['SYS']['caching']['cacheConfigurations'];
++
++        $cacheConfigurationsWithCachesSetToNullBackend = [];
++        foreach ($cacheConfigurations as $cacheName => $cacheConfiguration) {
++            // cache_core is handled in bootstrap already
++            if (is_array($cacheConfiguration) && $cacheName !== 'cache_core') {
++                $cacheConfiguration['backend'] = NullBackend::class;
++                $cacheConfiguration['options'] = [];
++            }
++            $cacheConfigurationsWithCachesSetToNullBackend[$cacheName] = $cacheConfiguration;
++        }
++        /** @var $cacheManager \TYPO3\CMS\Core\Cache\CacheManager */
++        $cacheManager = GeneralUtility::makeInstance(\TYPO3\CMS\Core\Cache\CacheManager::class);
++        $cacheManager->setCacheConfigurations($cacheConfigurationsWithCachesSetToNullBackend);
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DatabaseConnectMySQLCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DatabaseConnectMySQLCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DatabaseConnectMySQLCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DatabaseConnectMySQLCommand.php	2017-08-29 15:13:00.209889800 -0400
+@@ -0,0 +1,250 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use TYPO3\CMS\Install\Controller\Action\Step\DatabaseConnect;
++use RuntimeException;
++
++/**
++ * Handle the configuration of a MySQL database connection
++ */
++class DatabaseConnectMySQLCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Handle the configuration of a MySQL database connection')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where the TYPO3 local configuration file exists
++- the database connection may or may not be configured
++
++The configuration options map to the Doctrine DBAL configuration. Only the mysqli PHP
++driver is supported.
++
++The configuration may be done by providing the following informations:
++- a UNIX socket name
++- the host and port of the database server
++
++The name of the database to use must also be specified so it could be
++configured.
++
++The username and password to connect to the MySQL server are required.
++Only basic MySQL authentication method is supported.')
++            ->addOption(
++                'dry-run',
++                null,
++                InputOption::VALUE_NONE,
++                'If this option is set, the files and folders will not be created, but just the output which files would be created are shown'
++            )
++            ->addOption(
++                'host',
++                null,
++                InputOption::VALUE_OPTIONAL,
++                'If this option is set, it will configure the hostname of the database server'
++            )
++            ->addOption(
++                'port',
++                null,
++                InputOption::VALUE_OPTIONAL,
++                'If this option is set, it will configure the port to the database server'
++            )
++            ->addOption(
++                'socket',
++                null,
++                InputOption::VALUE_OPTIONAL,
++                'If this option is set, it will configure the connection with an UNIX socket'
++            )
++            ->addOption(
++                'database',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The database to use'
++            )
++            ->addOption(
++                'user',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The user to use for the database connection'
++            )
++            ->addOption(
++                'password',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The password to use for the database connection'
++            );
++    }
++
++    /**
++     * Executes the command to
++     * - configure the database connection
++     * - configure the database to use
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return void
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        $dryRun = $input->hasOption('dry-run') && $input->getOption('dry-run') != false ? true : false;
++
++        if ($this->installToolEnabled()) {
++            $databaseConnectStep = GeneralUtility::makeInstance(\TYPO3\CMS\Install\Controller\Action\Step\DatabaseConnect::class);
++
++            // Check if the user and password options were provided
++            if (!$dryRun && ($input->getOption('user') === null || $input->getOption('password') === null)) {
++                $io->error('The user and password options must be provided.');
++                $statusCode = -1;
++            } else {
++                // Check if we need to configure the database connection
++                $needsExecution = true;
++                try {
++                    $needsExecution = $databaseConnectStep->needsExecution();
++                } catch (\RuntimeException $e) {
++                }
++
++                // Configure the database connection
++                if ($needsExecution) {
++                    $statusCode = $this->configureConnection($databaseConnectStep, $input, $io);
++                } else {
++                    $io->success('Nothing to do, database connection already configured. Everything is in place.');
++                }
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++
++        return $statusCode;
++    }
++
++    /**
++     * Parse the input values and construct a Doctrine connection array
++     *
++     * @param DatabaseConnect $databaseConnectStep
++     * @param InputInterface $input
++     * @param SymphonyStyle $io
++     *
++     * @return void
++     */
++    private function configureConnection($databaseConnectStep, $input, $io) {
++        $statusCode = 0;
++
++        if ($dryRun) {
++            $io->success('Database connection would be written.');
++            $statusCode = 1;
++        } else {
++            $values = $this->getConnectionValues($input, $io);
++            if ($values === null) {
++                // The errors have already been set by getConnectionValues, we just set the
++                // return status code here
++                $statusCode = -1;
++            } else {
++                $databaseConnectStep->setPostValues(['values' => $values]);
++                $this->loadBaseExtensions();
++
++                try {
++                    $result = $databaseConnectStep->execute();
++                    if (count($result) > 0) {
++                        foreach ($result as $error) {
++                            $io->error($error->getTitle() . LF . $error->getMessage());
++                        }
++                        $statusCode = -1;
++                    } else {
++                        $io->success('Database connection configured with success.');
++                    }
++                } catch (RedirectException $e) {
++                    $io->error($error->getTitle() . LF . $error->getMessage());
++                    $statusCode = -1;
++                }
++            }
++        }
++
++        return $statusCode;
++    }
++
++    /**
++     * Parse the input values and construct a Doctrine connection array
++     *
++     * @param InputInterface $input
++     * @param SymphonyStyle $io
++     *
++     * @return int : The return code of the command
++     */
++    private function getConnectionValues($input, $io)
++    {
++        // Determine the connection informations
++        $socket = $input->getOption('socket');
++        $host = $input->getOption('host');
++        $port = $input->getOption('port');
++        $database = $input->getOption('database');
++
++        // Check the consistency of the provided options
++        if ($socket !== null) {
++            if ($host !== null || $port !== null) {
++                $io->error('When an UNIX socket is used, you should not provide ' .
++                           'host/port/service informations.');
++                return null;
++            }
++        } else if ($host === null || $port === null) {
++            $io->error('The host, port and database informations must be provided.');
++            return null;
++        }
++
++        // Configure the connection values
++        $values = [
++            'charset' => 'utf8',
++            'driver' => 'mysqli',
++            // The POST data refer to the username in the fluid template
++            'username' => $input->getOption('user'),
++            'password' => $input->getOption('password'),
++            'database' => $database,
++        ];
++
++        if ($socket !== null) {
++            $values = array_merge(
++                $values,
++                [
++                    'socket' => $socket,
++                ]
++            );
++        } else {
++            $values = array_merge(
++                $values,
++                [
++                    'host' => $host,
++                    'port' => $port,
++                ]
++            );
++        }
++
++        return $values;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DatabaseDataCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DatabaseDataCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DatabaseDataCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DatabaseDataCommand.php	2017-08-29 15:13:00.216889100 -0400
+@@ -0,0 +1,122 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use TYPO3\CMS\Install\Controller\Action\Step\DatabaseData;
++
++/**
++ * Handle the creation of the default folders and configuration files from factory
++ */
++class DatabaseDataCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Handle the creation of the initial database data')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where only the links to TYPO3 were configured (before running the first install tool)')
++            ->addOption(
++                'dry-run',
++                null,
++                InputOption::VALUE_NONE,
++                'If this option is set, the files and folders will not be created, but just the output which files would be created are shown'
++            )
++            ->addOption(
++                'username',
++                null,
++                InputOption::VALUE_OPTIONAL,
++                'If this option is set, it will create an admin user with the provided username. Otherwise, the user will be "admin"'
++            )
++            ->addOption(
++                'password',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The password for the admin user'
++            )
++            ->addOption(
++                'sitename',
++                null,
++                InputOption::VALUE_OPTIONAL,
++                'If this option is set, it will configure the site name in the local configuration'
++            );
++    }
++
++    /**
++     * Executes the command to
++     * - create main folder structure
++     * - create typo3conf/LocalConfiguration.php
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return int : The return code of the command
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        $dryRun = $input->hasOption('dry-run') && $input->getOption('dry-run') != false ? true : false;
++
++        if ($this->installToolEnabled()) {
++            $databaseDataStep = GeneralUtility::makeInstance(\TYPO3\CMS\Install\Controller\Action\Step\DatabaseData::class);
++            if ($databaseDataStep->needsExecution()) {
++                if ($dryRun) {
++                    $io->success('Database initial data would be imported.');
++                    $statusCode = 1;
++                } else {
++                    $values = [
++                        'values' => [
++                            'username' => $input->hasOption('username') ? $input->getOption('username') : '',
++                            'password' => $input->getOption('password'),
++                            'sitename' => $input->hasOption('sitename') ? $input->getOption('sitename') : '',
++                        ]
++                    ];
++                    $databaseDataStep->setPostValues($values);
++
++                    $this->loadBaseExtensions();
++                    $result = $databaseDataStep->execute();
++                    if (count($result) > 0) {
++                        foreach ($result as $error) {
++                            $io->error($error->getTitle() . LF . $error->getMessage());
++                        }
++                        $statusCode = -1;
++                    } else {
++                        $io->success('Database initial data imported with success.');
++                    }
++                }
++            } else {
++                $io->success('Nothing to do, database initial data already imported. Everything is in place.');
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++
++        return $statusCode;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DefaultConfigurationCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DefaultConfigurationCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DefaultConfigurationCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DefaultConfigurationCommand.php	2017-08-29 15:13:00.224888300 -0400
+@@ -0,0 +1,86 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use TYPO3\CMS\Install\Controller\Action\Step\DefaultConfiguration;
++
++/**
++ * Handle the creation of the default folders and configuration files from factory
++ */
++class DefaultConfigurationCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Set some configuration values based on the system environment.')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where the base data has been imported in the database')
++            ->addOption(
++                'dry-run',
++                null,
++                InputOption::VALUE_NONE,
++                'If this option is set, some configuration values will not be created, but just the output of what will be done is shown'
++            );
++    }
++
++    /**
++     * Executes the command to
++     * - set some configuration values based on the system environment
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return int : The return code of the command
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++        
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        $dryRun = $input->hasOption('dry-run') && $input->getOption('dry-run') != false ? true : false;
++
++        if ($this->installToolEnabled()) {
++            $defaultConfigurationStep = GeneralUtility::makeInstance(\TYPO3\CMS\Install\Controller\Action\Step\DefaultConfiguration::class);
++            if ($defaultConfigurationStep->needsExecution()) {
++                if ($dryRun) {
++                    $io->success('Would set some configuration values.');
++                    $statusCode = 1;
++                } else {
++                    $defaultConfigurationStep->execute();
++                    $io->success('All configuration values were set with success.');
++                }
++            } else {
++                $io->success('Nothing to do, no missing configuration values found. Everything is in place.');
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++
++        return $statusCode;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DumpAutoloadCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DumpAutoloadCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/DumpAutoloadCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/DumpAutoloadCommand.php	2017-08-29 15:13:00.231887600 -0400
+@@ -0,0 +1,73 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Core\Bootstrap;
++use TYPO3\CMS\Core\Core\ClassLoadingInformation;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use RuntimeException;
++
++/**
++ * Handle the creation of the default folders and configuration files from factory
++ */
++class DumpAutoloadCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Dump class loading information for extensions')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where the install tool is enabled');
++    }
++    
++    /**
++     * Executes the command to update the autoload files
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return int : The return code of the command
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++        
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        if ($this->installToolEnabled()) {
++            if (Bootstrap::usesComposerClassLoading()) {
++                $io->error('Skipped generating additional class loading information in composer mode.');
++                $statusCode = -1;
++            } else {
++                ClassLoadingInformation::dumpClassLoadingInformation();
++                $io->success('Successfully dumped class loading information for extensions.');
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++        
++        return $statusCode;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/EnvironmentAndFoldersCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/EnvironmentAndFoldersCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/EnvironmentAndFoldersCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/EnvironmentAndFoldersCommand.php	2017-08-29 15:13:00.238886900 -0400
+@@ -0,0 +1,95 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use TYPO3\CMS\Install\Controller\Action\Step\EnvironmentAndFolders;
++use TYPO3\CMS\Install\Service\SilentConfigurationUpgradeService;
++
++/**
++ * Handle the creation of the default folders and configuration files from factory
++ */
++class EnvironmentAndFoldersCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Handle the creation of the default folders and configuration files')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where only the links to TYPO3 were configured (before running the first install tool)')
++            ->addOption(
++                'dry-run',
++                null,
++                InputOption::VALUE_NONE,
++                'If this option is set, the files and folders will not be created, but just the output which files would be created are shown'
++            );
++    }
++
++    /**
++     * Executes the command to
++     * - create main folder structure
++     * - create typo3conf/LocalConfiguration.php
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return int : The return code of the command
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        $dryRun = $input->hasOption('dry-run') && $input->getOption('dry-run') != false ? true : false;
++
++        if ($this->installToolEnabled()) {
++            $environmentAndFoldersStep = GeneralUtility::makeInstance(\TYPO3\CMS\Install\Controller\Action\Step\EnvironmentAndFolders::class);
++            if ($environmentAndFoldersStep->needsExecution()) {
++                if ($dryRun) {
++                    $io->success('Would create required files/folders.');
++                    $statusCode = 1;
++                } else {
++                    $environmentAndFoldersStep->execute();
++                    $upgradeService = GeneralUtility::makeInstance(SilentConfigurationUpgradeService::class);
++                    try {
++                        $upgradeService->execute();
++                        $io->success('All files/folders were created with success.');
++                    } catch (Exception\RedirectException $e) {
++                        $io->error('Unable to run silent configuration upgrade service');
++                        $statusCode = -1;
++                    }
++                }
++            } else {
++                $io->success('Nothing to do, no missing files or folder found. Everything is in place.');
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++
++        return $statusCode;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/SetConfigCommand.php typo3_src-8.7.4/typo3/sysext/install/Classes/Command/SetConfigCommand.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Command/SetConfigCommand.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Command/SetConfigCommand.php	2017-08-29 15:13:00.244886300 -0400
+@@ -0,0 +1,134 @@
++<?php
++namespace TYPO3\CMS\Install\Command;
++
++/*
++ * This file is part of the TYPO3 CMS project.
++ *
++ * It is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU General Public License, either version 2
++ * of the License, or any later version.
++ *
++ * For the full copyright and license information, please read the
++ * LICENSE.txt file that was distributed with this source code.
++ *
++ * The TYPO3 project - inspiring people to share!
++ */
++
++use Symfony\Component\Console\Input\InputInterface;
++use Symfony\Component\Console\Input\InputOption;
++use Symfony\Component\Console\Output\OutputInterface;
++use Symfony\Component\Console\Style\SymfonyStyle;
++use TYPO3\CMS\Core\Utility\GeneralUtility;
++use TYPO3\CMS\Install\Command\AbstractInstallCommand;
++use RuntimeException;
++
++/**
++ * Handle the creation of the default folders and configuration files from factory
++ */
++class SetConfigCommand extends AbstractInstallCommand
++{
++        /**
++     * Configure the command by defining the name, options and arguments
++     */
++    public function configure()
++    {
++        $this
++            ->setDescription('Handle the modification of one or many TYPO3 config values in the LocalConfiguration.php file')
++            ->setHelp('
++Assumptions:
++- a new setup of TYPO3 where the install tool is enabled')
++            ->addOption(
++                'dry-run',
++                null,
++                InputOption::VALUE_NONE,
++                'If this option is set, the configuration values will not be modified, but just an information if the config needs updating is shown.'
++            )
++            ->addOption(
++                'path',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The configuration value to modify, where each level is separated by the "/" character (ex: SYS/encryptionKey).'
++            )
++            ->addOption(
++                'value',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The value to configure. For an array, each element must be splitted with the "," character.'
++            )
++            ->addOption(
++                'type',
++                null,
++                InputOption::VALUE_REQUIRED,
++                'The type of the value (string, int, bool) DEFAULT: string.'
++            );
++    }
++
++    /**
++     * Executes the command to update the typo3conf/LocalConfiguration.php file with the
++     * new configuration values
++     *
++     * @param InputInterface $input
++     * @param OutputInterface $output
++     *
++     * @return int : The return code of the command
++     */
++    protected function execute(InputInterface $input, OutputInterface $output)
++    {
++        $statusCode = 0;
++
++        $io = new SymfonyStyle($input, $output);
++        $io->title($this->getDescription());
++
++        $dryRun = $input->hasOption('dry-run') && $input->getOption('dry-run') != false ? true : false;
++
++        if ($this->installToolEnabled()) {
++
++            $path = $input->getOption('path');
++            $value = $input->getOption('value');
++
++            // Check if the required values were provided
++            if ($path === null || $value === null) {
++                $io->error('The path and values options must be provided.');
++                $statusCode = -1;
++            } else {
++                // Parse the list of values
++                if ($input->hasOption('type')) {
++                    if ($input->getOption('type') == 'bool') {
++                        $value = ($value == 'true' || $value == 'on') ? true : false;
++                    } else if ($input->getOption('type') == 'int') {
++                        $value = intval($value);
++                    }
++                } else if (strpos($value, ",") !== false) {
++                    $value = explode(",", $value);
++                }
++
++                $configurationManager = GeneralUtility::makeInstance(\TYPO3\CMS\Core\Configuration\ConfigurationManager::class);
++                try {
++                    $currentValue = $configurationManager->getConfigurationValueByPath($path);
++                } catch (RuntimeException $e) {
++                    $currentValue = null;
++                }
++
++                if ($value !== $currentValue) {
++                    if ($dryRun) {
++                        $io->success('Would modify configuration.');
++                        $statusCode = 1;
++                    } else {
++                        $localConfigurationPathValuePairs = [
++                            $path => $value,
++                        ];
++                        $configurationManager->setLocalConfigurationValuesByPathValuePairs($localConfigurationPathValuePairs);
++                        $io->success('All config values were written with success.');
++                    }
++                } else {
++                    $io->success('Nothing to do, no config value to update. Everything is in place.');
++                }
++            }
++        } else {
++            $io->error($this->install_disabled_error);
++            $statusCode = -1;
++        }
++        
++        return $statusCode;
++    }
++}
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Controller/Action/Step/DefaultConfiguration.php typo3_src-8.7.4/typo3/sysext/install/Classes/Controller/Action/Step/DefaultConfiguration.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Classes/Controller/Action/Step/DefaultConfiguration.php	2017-07-25 12:08:01.000000000 -0400
++++ typo3_src-8.7.4/typo3/sysext/install/Classes/Controller/Action/Step/DefaultConfiguration.php	2017-08-29 15:13:00.251885600 -0400
+@@ -138,8 +138,10 @@
+             EnableFileService::removeInstallToolEnableFile();
+         }
+ 
++        if (!(TYPO3_REQUESTTYPE & TYPO3_REQUESTTYPE_CLI)) {
+         \TYPO3\CMS\Core\Utility\HttpUtility::redirect(GeneralUtility::getIndpEnv('TYPO3_SITE_URL') . TYPO3_mainDir . 'index.php', \TYPO3\CMS\Core\Utility\HttpUtility::HTTP_STATUS_303);
+     }
++    }
+ 
+     /**
+      * Step needs to be executed if 'isInitialInstallationInProgress' is set to TRUE in LocalConfiguration
+diff -wruN typo3_src-8.7.5_orig/typo3/sysext/install/Classes/Service/SilentConfigurationUpgradeService.php typo3_src-8.7.5/typo3/sysext/install/Classes/Service/SilentConfigurationUpgradeService.php
+--- typo3_src-8.7.5_orig/typo3/sysext/install/Classes/Service/SilentConfigurationUpgradeService.php     2017-09-05 10:45:31.000000000 +0000
++++ typo3_src-8.7.5/typo3/sysext/install/Classes/Service/SilentConfigurationUpgradeService.php  2017-09-06 04:22:24.286075606 +0000
+@@ -562,11 +562,13 @@
+      */
+     protected function throwRedirectException()
+     {
++        if (!(TYPO3_REQUESTTYPE & TYPO3_REQUESTTYPE_CLI)) {
+         throw new RedirectException(
+             'Configuration updated, reload needed',
+             1379024938
+         );
+     }
++    }
+ 
+     /**
+      * Migrate the configuration value thumbnails_png to a boolean value.
+diff -wruN typo3_src-8.7.4_orig/typo3/sysext/install/Configuration/Commands.php typo3_src-8.7.4/typo3/sysext/install/Configuration/Commands.php
+--- typo3_src-8.7.4_orig/typo3/sysext/install/Configuration/Commands.php	1969-12-31 19:00:00.000000000 -0500
++++ typo3_src-8.7.4/typo3/sysext/install/Configuration/Commands.php	2017-08-29 15:13:00.261884600 -0400
+@@ -0,0 +1,29 @@
++<?php
++/**
++ * Commands to be executed by typo3, where the key of the array
++ * is the name of the command (to be called as the first argument after typo3).
++ * Required parameter is the "class" of the command which needs to be a subclass
++ * of Symfony/Console/Command.
++ *
++ * example: bin/typo3 backend:lock
++ */
++return [
++    'install:environmentandfolders' => [
++        'class' => \TYPO3\CMS\Install\Command\EnvironmentAndFoldersCommand::class
++    ],
++    'install:databaseconnect:mysql' => [
++        'class' => \TYPO3\CMS\Install\Command\DatabaseConnectMySQLCommand::class
++    ],
++    'install:databasedata' => [
++        'class' => \TYPO3\CMS\Install\Command\DatabaseDataCommand::class
++    ],
++    'install:setconfig' => [
++        'class' => \TYPO3\CMS\Install\Command\SetConfigCommand::class
++    ],
++    'install:defaultconfiguration' => [
++        'class' => \TYPO3\CMS\Install\Command\DefaultConfigurationCommand::class
++    ],
++    'install:dumpautoload' => [
++        'class' => \TYPO3\CMS\Install\Command\DumpAutoloadCommand::class
++    ],
++];
