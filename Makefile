@@ -62,7 +62,7 @@ fullclean: clean testclean uninstall
 
 distclean: clean testclean
 	if [ -e "packer_cache" ]; then \
-	    rm -rf packer_cache \
+	    rm -rf packer_cache; \
 	fi
 
 .PHONY: build install uninstall clean test testclean fullclean distclean
