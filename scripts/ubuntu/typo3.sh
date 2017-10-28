@@ -8,17 +8,22 @@ if [ "${TYPO3_VERSION}" == "" ]; then
     exit 1
 fi
 
+if [ "${PHP_VERSION}" == "" ]; then
+    echo "You must specify the PHP version to use as the PHP_VERSION environment variable to the script"
+    exit 1
+fi
+
 #
 # Configure PHP
 #
 
 sudo apt-get install -y php-fpm php-opcache php-gd php-mysql php-soap php-xml php-zip php-xdebug;
-sudo sed -i "s/user = www-data/user = vagrant/" /etc/php/7.0/fpm/pool.d/www.conf
-sudo sed -i "s/group = www-data/group = vagrant/" /etc/php/7.0/fpm/pool.d/www.conf
-sudo su - -c "echo 'php_admin_value[max_execution_time]=240' >> /etc/php/7.0/fpm/pool.d/www.conf"
-sudo su - -c "echo 'php_admin_value[max_input_vars]=1500' >> /etc/php/7.0/fpm/pool.d/www.conf"
-sudo su - -c "echo 'php_admin_value[xdebug.max_nesting_level]=400' >> /etc/php/7.0/fpm/pool.d/www.conf"
-sudo service php7.0-fpm restart
+sudo sed -i "s/user = www-data/user = vagrant/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+sudo sed -i "s/group = www-data/group = vagrant/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+sudo su - -c "echo 'php_admin_value[max_execution_time]=240' >> /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
+sudo su - -c "echo 'php_admin_value[max_input_vars]=1500' >> /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
+sudo su - -c "echo 'php_admin_value[xdebug.max_nesting_level]=400' >> /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
+sudo service php${PHP_VERSION}-fpm restart
 
 # @todo: en TCP?
 # @todo: configure php parameters (errors, xdebug, etc.)
@@ -31,6 +36,7 @@ sudo apt-get install -y apache2
 sudo a2enmod alias headers proxy_fcgi rewrite ssl status
 sudo a2dissite 000-default
 sudo mv /tmp/apache2-typo3-site.conf /etc/apache2/sites-available/typo3.conf
+sudo sed -i "s/proxy:unix:\/var\/run\/php\/php-fpm.sock/proxy:unix:\/var\/run\/php\/php${PHP_VERSION}-fpm.sock/" /etc/apache2/sites-available/typo3.conf
 sudo a2ensite typo3
 sudo service apache2 restart
 
@@ -41,7 +47,7 @@ sudo service apache2 restart
 sudo apt-get install -y mariadb-server
 sudo mysql -e "CREATE DATABASE typo3;"
 sudo mysql -e "CREATE USER typo3@localhost identified by 'typo3'"
-sudo mysql -e "GRANT ALL PRIVILEGES ON typo3.* TO typo3"
+sudo mysql -e "GRANT ALL PRIVILEGES ON typo3.* TO typo3@localhost"
 
 #
 # Configure TYPO3
