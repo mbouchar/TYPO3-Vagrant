@@ -182,7 +182,7 @@ diff -wruN typo3_src-8.7.4_orig/typo3/sysext/core/Classes/Core/SystemEnvironment
                  && Bootstrap::usesComposerClassLoading()
                  && StringUtility::endsWith($scriptPath, 'typo3')
              ) {
-@@ -282,9 +286,9 @@
+@@ -275,9 +279,9 @@
       *
       * @return string Absolute path to entry script
       */

@@ -10,7 +10,7 @@ VAGRANT_BOX_NAME=${USER}/${VAGRANT_BOX_VARIANT}
 VAGRANT_BOX=output/${DISTRIB_NAME}-${DISTRIB_VERSION}-amd64-${VAGRANT_PROVIDER}.box
 
 DIST_DIR=dist
-TYPO3_VERSION=8.7.5
+TYPO3_VERSION=8.7.8
 TYPO3_URL=get.typo3.org/${TYPO3_VERSION}
 TYPO3_DIST=${DIST_DIR}/typo3_src-${TYPO3_VERSION}.tar.gz
 
@@ -58,11 +58,11 @@ testclean:
 	    rm -f Vagrantfile; \
 	fi
 
-fullclean: clean testclean uninstall
-
 distclean: clean testclean
 	if [ -e "packer_cache" ]; then \
 	    rm -rf packer_cache; \
 	fi
+
+fullclean: distclean uninstall
 
 .PHONY: build install uninstall clean test testclean fullclean distclean
